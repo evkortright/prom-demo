@@ -8,7 +8,7 @@
 # Pipeline:
 #   prometheus receiver (scrape /metrics)
 #     → memory_limiter
-#     → resourcedetection (adds host.name, os.type automatically)
+#     → resource_detection (adds host.name, os.type automatically)
 #     → transform/resource_promotion (lifts static labels to resource level)
 #     → transform/universal (job → service.name, instance → service.instance.id)
 #     → transform/http (HTTP domain label normalization)
@@ -60,7 +60,7 @@ processors:
 
   # Automatically detect and add host-level resource attributes.
   # Adds: host.name (container ID), os.type, os.description, etc.
-  resourcedetection:
+  resource_detection:
     detectors: [env, system]
     timeout: 5s
     override: false
@@ -276,7 +276,7 @@ service:
       processors:
         - memory_limiter
         - cumulative_to_delta
-        - resourcedetection
+        - resource_detection
         - transform/resource_promotion
         - transform/universal
         - transform/http
