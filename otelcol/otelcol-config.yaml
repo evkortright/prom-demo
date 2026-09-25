@@ -41,6 +41,23 @@ processors:
     timeout: 10s
     send_batch_size: 1000
 
+  # ---------------------------------------------------------------------------
+  # Histogram temporality conversion
+  #
+  # The Prometheus receiver emits histograms with cumulative temporality.
+  # The Elasticsearch exporter in otel mapping mode only accepts delta
+  # temporality histograms — cumulative ones are silently dropped with a
+  # validation warning. This processor converts them before export.
+  #
+  # Scoped by regexp to the three histogram metrics in this pipeline.
+  # Must run before transform/metric_names so the original Prometheus
+  # names are still in place for matching.
+  #
+  # max_staleness: 2× scrape interval (15s) to handle missed scrapes cleanly.
+  # ---------------------------------------------------------------------------
+  cumulative_to_delta:
+    max_staleness: 30s
+
   # Automatically detect and add host-level resource attributes.
   # Adds: host.name (container ID), os.type, os.description, etc.
   resourcedetection:
@@ -258,6 +275,7 @@ service:
       receivers: [prometheus]
       processors:
         - memory_limiter
+        - cumulative_to_delta
         - resourcedetection
         - transform/resource_promotion
         - transform/universal

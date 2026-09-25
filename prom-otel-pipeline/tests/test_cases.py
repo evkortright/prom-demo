@@ -352,6 +352,54 @@ TEST_CASES = [
     },
 
     # -------------------------------------------------------------------------
+    # 5b. HTTP duration histogram
+    # -------------------------------------------------------------------------
+    {
+        "name": "http_duration_present",
+        "description": "http_request_duration_seconds renamed to http.server.request.duration and landing in ES",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE http.server.request.duration IS NOT NULL
+            | STATS n = COUNT(*)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+
+    # -------------------------------------------------------------------------
+    # 6b. gRPC duration histogram
+    # -------------------------------------------------------------------------
+    {
+        "name": "grpc_duration_present",
+        "description": "grpc_server_handling_seconds renamed to rpc.server.duration and landing in ES",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE rpc.server.duration IS NOT NULL
+            | STATS n = COUNT(*)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+
+    # -------------------------------------------------------------------------
+    # 7b. Database duration histogram
+    # -------------------------------------------------------------------------
+    {
+        "name": "db_duration_present",
+        "description": "db_query_duration_seconds renamed to db.client.operation.duration and landing in ES",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE db.client.operation.duration IS NOT NULL
+            | STATS n = COUNT(*)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+
+    # -------------------------------------------------------------------------
     # 8. Original labels preserved (backward compatibility)
     # -------------------------------------------------------------------------
     {
