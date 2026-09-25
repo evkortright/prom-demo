@@ -313,6 +313,44 @@ TEST_CASES = [
         ],
     },
 
+    {
+        "name": "go_threads_normalized",
+        "description": "go_threads renamed to go.processor.limit",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE go.processor.limit IS NOT NULL
+            | STATS n = COUNT(*)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+    {
+        "name": "go_memory_allocated_normalized",
+        "description": "go_memstats_alloc_bytes_total renamed to go.memory.allocated (cumulative counter)",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE go.memory.allocated IS NOT NULL
+            | EVAL c = TO_DOUBLE(go.memory.allocated)
+            | STATS total = MAX(c)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "total", "threshold": 0},
+        ],
+    },
+    {
+        "name": "go_passthrough_present",
+        "description": "Unmapped go_memstats_* metrics pass through with original Prometheus names",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE go_memstats_mspan_inuse_bytes IS NOT NULL
+            | STATS n = COUNT(*)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+
     # -------------------------------------------------------------------------
     # 8. Original labels preserved (backward compatibility)
     # -------------------------------------------------------------------------

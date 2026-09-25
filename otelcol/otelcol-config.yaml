@@ -164,9 +164,16 @@ processors:
           - set(metric.name, "db.client.operation.errors")
             where metric.name == "db_errors_total"
 
-          # Go runtime — partial, extended incrementally
+          # Go runtime
+          #
+          # Source: Prometheus client_golang GoCollector (runtime.MemStats).
+          # Target: OTel Go semconv where a clear equivalent exists.
+          #
+          # MAPPED — unambiguous OTel semconv equivalents:
           - set(metric.name, "go.goroutine.count")
             where metric.name == "go_goroutines"
+          - set(metric.name, "go.processor.limit")
+            where metric.name == "go_threads"
           - set(metric.name, "go.memory.heap.used")
             where metric.name == "go_memstats_heap_inuse_bytes"
           - set(metric.name, "go.memory.heap.idle")
@@ -175,24 +182,54 @@ processors:
             where metric.name == "go_memstats_heap_released_bytes"
           - set(metric.name, "go.memory.heap.objects")
             where metric.name == "go_memstats_heap_objects"
-          - set(metric.name, "go.memory.stack.used")
-            where metric.name == "go_memstats_stack_inuse_bytes"
-          - set(metric.name, "go.memory.stack.system")
-            where metric.name == "go_memstats_stack_sys_bytes"
           - set(metric.name, "go.memory.heap.alloc")
             where metric.name == "go_memstats_alloc_bytes"
           - set(metric.name, "go.memory.heap.sys")
             where metric.name == "go_memstats_heap_sys_bytes"
-          - set(metric.name, "go.gc.collections")
+          - set(metric.name, "go.memory.stack.used")
+            where metric.name == "go_memstats_stack_inuse_bytes"
+          - set(metric.name, "go.memory.stack.system")
+            where metric.name == "go_memstats_stack_sys_bytes"
+          - set(metric.name, "go.memory.system")
+            where metric.name == "go_memstats_sys_bytes"
+          - set(metric.name, "go.memory.allocated")
+            where metric.name == "go_memstats_alloc_bytes_total"
+          - set(metric.name, "go.memory.allocations")
+            where metric.name == "go_memstats_mallocs_total"
+          - set(metric.name, "go.memory.frees")
+            where metric.name == "go_memstats_frees_total"
+          - set(metric.name, "go.memory.gc.goal")
+            where metric.name == "go_memstats_next_gc_bytes"
+          - set(metric.name, "go.memory.gc.overhead")
+            where metric.name == "go_memstats_gc_sys_bytes"
+          - set(metric.name, "go.memory.gc.last_collection")
+            where metric.name == "go_memstats_last_gc_time_seconds"
+          - set(metric.name, "go.memory.gc.pause")
             where metric.name == "go_gc_duration_seconds"
+
+          # PASSTHROUGH — no unambiguous OTel semconv equivalent.
+          # Pass through with original Prometheus names. Queryable but excluded
+          # from OTel-normalized dashboards. Conversion tool flags these for
+          # manual review.
+          #   go_memstats_mspan_inuse_bytes   — internal allocator structures
+          #   go_memstats_mspan_sys_bytes     — internal allocator structures
+          #   go_memstats_mcache_inuse_bytes  — internal allocator structures
+          #   go_memstats_mcache_sys_bytes    — internal allocator structures
+          #   go_memstats_buck_hash_sys_bytes — profiling bucket overhead
+          #   go_memstats_other_sys_bytes     — catch-all system memory
+          #   go_info                         — label-only info metric
 
           # Process (standard across all Go apps)
           - set(metric.name, "process.cpu.time")
             where metric.name == "process_cpu_seconds_total"
           - set(metric.name, "process.memory.usage")
             where metric.name == "process_resident_memory_bytes"
+          - set(metric.name, "process.memory.virtual")
+            where metric.name == "process_virtual_memory_bytes"
           - set(metric.name, "process.open_file_descriptors")
             where metric.name == "process_open_fds"
+          - set(metric.name, "process.start_time")
+            where metric.name == "process_start_time_seconds"
 
 exporters:
   elasticsearch:
