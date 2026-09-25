@@ -1,0 +1,87 @@
+// Paste this into Kibana Dev Tools to test the pipeline against
+// representative documents without writing to any index.
+//
+// This uses the Elasticsearch Pipeline Simulate API — it runs the pipeline
+// against the provided documents and returns what would be indexed,
+// without actually indexing anything.
+//
+// Tests all three domains: HTTP, gRPC, and Database.
+
+POST _ingest/pipeline/metrics-generic.prometheus@custom/_simulate
+{
+  "docs": [
+    {
+      "_source": {
+        "@timestamp": "2026-09-25T16:10:23.775Z",
+        "data_stream": {
+          "dataset": "generic.prometheus",
+          "namespace": "default",
+          "type": "metrics"
+        },
+        "labels": {
+          "__name__": "http_requests_total",
+          "env": "production",
+          "host_name": "prom-demo-host-01",
+          "instance": "app:8080",
+          "job": "prom-demo",
+          "method": "POST",
+          "path": "/api/users",
+          "region": "us-central1",
+          "status_code": "404"
+        },
+        "metrics": {
+          "http_requests_total": 5
+        }
+      }
+    },
+    {
+      "_source": {
+        "@timestamp": "2026-09-25T16:11:23.778Z",
+        "data_stream": {
+          "dataset": "generic.prometheus",
+          "namespace": "default",
+          "type": "metrics"
+        },
+        "labels": {
+          "__name__": "grpc_server_handled_total",
+          "env": "production",
+          "grpc_code": "OK",
+          "grpc_method": "GetUser",
+          "grpc_service": "OrderService",
+          "grpc_type": "server_stream",
+          "host_name": "prom-demo-host-01",
+          "instance": "app:8080",
+          "job": "prom-demo",
+          "region": "us-central1"
+        },
+        "metrics": {
+          "grpc_server_handled_total": 19
+        }
+      }
+    },
+    {
+      "_source": {
+        "@timestamp": "2026-09-25T16:09:53.775Z",
+        "data_stream": {
+          "dataset": "generic.prometheus",
+          "namespace": "default",
+          "type": "metrics"
+        },
+        "labels": {
+          "__name__": "db_query_duration_seconds_count",
+          "db_name": "orders",
+          "db_operation": "UPDATE",
+          "db_system": "postgresql",
+          "env": "production",
+          "host_name": "prom-demo-host-01",
+          "instance": "app:8080",
+          "job": "prom-demo",
+          "region": "us-central1"
+        },
+        "metrics": {
+          "db_query_duration_seconds_count": 196
+        }
+      }
+    }
+  ]
+}

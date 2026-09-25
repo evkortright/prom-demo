@@ -1,0 +1,236 @@
+# =============================================================================
+# prom-demo OTel Collector Configuration — v1.0
+#
+# Transforms raw Prometheus metrics to OTel semantic conventions before
+# indexing into Elasticsearch. Produces metrics-*.otel-* data streams
+# with proper OTel field structure, separate from raw PRW data.
+#
+# Pipeline:
+#   prometheus receiver (scrape /metrics)
+#     → memory_limiter
+#     → resourcedetection (adds host.name, os.type automatically)
+#     → transform/resource_promotion (lifts static labels to resource level)
+#     → transform/universal (job → service.name, instance → service.instance.id)
+#     → transform/http (HTTP domain label normalization)
+#     → transform/grpc (gRPC domain label normalization)
+#     → transform/database (DB domain label normalization)
+#     → transform/metric_names (Prometheus name → OTel semconv name)
+#     → batch
+#     → elasticsearch exporter (otel mapping mode)
+# =============================================================================
+
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: "prom-demo"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["app:8080"]
+              labels:
+                env: "production"
+                region: "us-central1"
+                host_name: "prom-demo-host-01"
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+
+  batch:
+    timeout: 10s
+    send_batch_size: 1000
+
+  # Automatically detect and add host-level resource attributes.
+  # Adds: host.name (container ID), os.type, os.description, etc.
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 5s
+    override: false
+
+  # ---------------------------------------------------------------------------
+  # FIX: Promote static scrape labels to resource attributes.
+  #
+  # The Prometheus receiver puts static_config labels (env, region, host_name)
+  # on datapoints, not on the resource. This processor lifts them to resource
+  # level where they belong as OTel resource attributes, then removes them
+  # from the datapoint to avoid duplication.
+  # ---------------------------------------------------------------------------
+  transform/resource_promotion:
+    metric_statements:
+      - context: datapoint
+        statements:
+          # Promote env → resource, remove from datapoint
+          - set(resource.attributes["deployment.environment.name"], attributes["env"])
+            where attributes["env"] != nil
+          - delete_key(attributes, "env")
+
+          # Promote region → resource, remove from datapoint
+          - set(resource.attributes["cloud.region"], attributes["region"])
+            where attributes["region"] != nil
+          - delete_key(attributes, "region")
+
+          # Promote host_name → resource as host.name.scrape, remove from datapoint
+          - set(resource.attributes["host.name.scrape"], attributes["host_name"])
+            where attributes["host_name"] != nil
+          - delete_key(attributes, "host_name")
+
+  # ---------------------------------------------------------------------------
+  # LAYER 2 — Universal resource attribute normalization
+  #
+  # job and instance are set on the resource by the Prometheus receiver.
+  # We copy them to their OTel semconv equivalents.
+  # ---------------------------------------------------------------------------
+  transform/universal:
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["service.name"], attributes["job"])
+            where attributes["job"] != nil
+          - set(attributes["service.instance.id"], attributes["instance"])
+            where attributes["instance"] != nil
+
+  # ---------------------------------------------------------------------------
+  # LAYER 2 — HTTP domain label normalization
+  # ---------------------------------------------------------------------------
+  transform/http:
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["http.request.method"], attributes["method"])
+            where attributes["method"] != nil
+          - set(attributes["url.path"], attributes["path"])
+            where attributes["path"] != nil
+          - set(attributes["http.response.status_code"], Int(attributes["status_code"]))
+            where attributes["status_code"] != nil
+
+  # ---------------------------------------------------------------------------
+  # LAYER 2 — gRPC domain label normalization
+  # ---------------------------------------------------------------------------
+  transform/grpc:
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["rpc.service"], attributes["grpc_service"])
+            where attributes["grpc_service"] != nil
+          - set(attributes["rpc.method"], attributes["grpc_method"])
+            where attributes["grpc_method"] != nil
+          - set(attributes["rpc.grpc.status_code"], attributes["grpc_code"])
+            where attributes["grpc_code"] != nil
+          - set(attributes["rpc.grpc.stream_type"], attributes["grpc_type"])
+            where attributes["grpc_type"] != nil
+
+  # ---------------------------------------------------------------------------
+  # LAYER 2 — Database domain label normalization
+  # ---------------------------------------------------------------------------
+  transform/database:
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["db.system.name"], attributes["db_system"])
+            where attributes["db_system"] != nil
+          - set(attributes["db.namespace"], attributes["db_name"])
+            where attributes["db_name"] != nil
+          - set(attributes["db.operation.name"], attributes["db_operation"])
+            where attributes["db_operation"] != nil
+
+  # ---------------------------------------------------------------------------
+  # LAYER 1 — Metric name normalization
+  #
+  # Renames Prometheus metric names to OTel semantic convention equivalents.
+  # Unmapped metrics pass through unchanged — safe for any Prometheus source.
+  # ---------------------------------------------------------------------------
+  transform/metric_names:
+    metric_statements:
+      - context: metric
+        statements:
+          # HTTP
+          - set(metric.name, "http.server.request.count")
+            where metric.name == "http_requests_total"
+          - set(metric.name, "http.server.request.duration")
+            where metric.name == "http_request_duration_seconds"
+
+          # gRPC
+          - set(metric.name, "rpc.server.request.count")
+            where metric.name == "grpc_server_handled_total"
+          - set(metric.name, "rpc.server.duration")
+            where metric.name == "grpc_server_handling_seconds"
+
+          # Database
+          - set(metric.name, "db.client.operation.duration")
+            where metric.name == "db_query_duration_seconds"
+          - set(metric.name, "db.client.connection.count")
+            where metric.name == "db_connections_active"
+          - set(metric.name, "db.client.operation.errors")
+            where metric.name == "db_errors_total"
+
+          # Go runtime — partial, extended incrementally
+          - set(metric.name, "go.goroutine.count")
+            where metric.name == "go_goroutines"
+          - set(metric.name, "go.memory.heap.used")
+            where metric.name == "go_memstats_heap_inuse_bytes"
+          - set(metric.name, "go.memory.heap.idle")
+            where metric.name == "go_memstats_heap_idle_bytes"
+          - set(metric.name, "go.memory.heap.released")
+            where metric.name == "go_memstats_heap_released_bytes"
+          - set(metric.name, "go.memory.heap.objects")
+            where metric.name == "go_memstats_heap_objects"
+          - set(metric.name, "go.memory.stack.used")
+            where metric.name == "go_memstats_stack_inuse_bytes"
+          - set(metric.name, "go.memory.stack.system")
+            where metric.name == "go_memstats_stack_sys_bytes"
+          - set(metric.name, "go.memory.heap.alloc")
+            where metric.name == "go_memstats_alloc_bytes"
+          - set(metric.name, "go.memory.heap.sys")
+            where metric.name == "go_memstats_heap_sys_bytes"
+          - set(metric.name, "go.gc.collections")
+            where metric.name == "go_gc_duration_seconds"
+
+          # Process (standard across all Go apps)
+          - set(metric.name, "process.cpu.time")
+            where metric.name == "process_cpu_seconds_total"
+          - set(metric.name, "process.memory.usage")
+            where metric.name == "process_resident_memory_bytes"
+          - set(metric.name, "process.open_file_descriptors")
+            where metric.name == "process_open_fds"
+
+exporters:
+  elasticsearch:
+    endpoints:
+      - ${ES_ENDPOINT}
+    api_key: ${ES_API_KEY}
+    mapping:
+      mode: otel
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 120s
+    timeout: 30s
+
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - transform/resource_promotion
+        - transform/universal
+        - transform/http
+        - transform/grpc
+        - transform/database
+        - transform/metric_names
+        - batch
+      exporters: [elasticsearch, debug]
+
+  telemetry:
+    logs:
+      level: info

@@ -1,0 +1,63 @@
+services:
+
+  # The demo application.
+  app:
+    build: ./app
+    container_name: prom-demo-app
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Prometheus: scrapes the app, remote_writes to the OTel Collector.
+  prometheus:
+    image: prom/prometheus:v3.0.0
+    container_name: prom-demo-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus/prometheus-resolved.yaml:/etc/prometheus/prometheus.yaml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # OTel Collector: receives Prometheus scrape data, normalizes to OTel semconv,
+  # exports to Elastic Serverless via the Elasticsearch exporter.
+  otelcol:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: prom-demo-otelcol
+    ports:
+      - "8888:8888"   # Collector metrics (self-monitoring)
+      - "4317:4317"   # OTLP gRPC receiver (for future use)
+    volumes:
+      - ./otelcol/otelcol-config.yaml:/etc/otelcol/config.yaml:ro
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      - ES_ENDPOINT=${ES_ENDPOINT}
+      - ES_API_KEY=${ES_API_KEY}
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+networks:
+  default:
+    name: prom-demo-net

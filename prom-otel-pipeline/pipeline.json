@@ -1,0 +1,319 @@
+{
+  "description": "Normalizes raw Prometheus remote_write data to OpenTelemetry semantic conventions. Install as metrics-generic.prometheus@custom to apply automatically to all Prometheus remote_write ingestion.",
+  "processors": [
+
+    // -------------------------------------------------------------------------
+    // LAYER 1 — Metric name normalization
+    //
+    // Renames the Prometheus metric name in labels.__name__ to its OTel
+    // semantic convention equivalent. The original is preserved in
+    // labels.prometheus.metric.name for reference and rollback.
+    //
+    // Prometheus naming conventions removed:
+    //   _total  suffix → Sum (monotonic) instrument type
+    //   _seconds suffix → unit "s" (seconds)
+    //   _bytes  suffix → unit "By" (bytes)
+    //   _count  suffix → histogram/summary count component
+    //   _sum    suffix → histogram/summary sum component
+    //   _bucket suffix → histogram bucket component
+    // -------------------------------------------------------------------------
+
+    {
+      "set": {
+        "description": "Preserve original Prometheus metric name before normalization",
+        "field": "labels.prometheus.metric.name",
+        "copy_from": "labels.__name__",
+        "ignore_empty_value": true
+      }
+    },
+
+    // HTTP metric names
+    {
+      "gsub": {
+        "description": "Normalize http_requests_total → http.server.request.count",
+        "field": "labels.__name__",
+        "pattern": "^http_requests_total$",
+        "replacement": "http.server.request.count",
+        "ignore_missing": true
+      }
+    },
+    {
+      "gsub": {
+        "description": "Normalize http_request_duration_seconds → http.server.request.duration",
+        "field": "labels.__name__",
+        "pattern": "^http_request_duration_seconds(?:_bucket|_count|_sum)?$",
+        "replacement": "http.server.request.duration",
+        "ignore_missing": true
+      }
+    },
+
+    // gRPC metric names
+    {
+      "gsub": {
+        "description": "Normalize grpc_server_handled_total → rpc.server.request.count",
+        "field": "labels.__name__",
+        "pattern": "^grpc_server_handled_total$",
+        "replacement": "rpc.server.request.count",
+        "ignore_missing": true
+      }
+    },
+    {
+      "gsub": {
+        "description": "Normalize grpc_server_handling_seconds → rpc.server.duration",
+        "field": "labels.__name__",
+        "pattern": "^grpc_server_handling_seconds(?:_bucket|_count|_sum)?$",
+        "replacement": "rpc.server.duration",
+        "ignore_missing": true
+      }
+    },
+
+    // Database metric names
+    {
+      "gsub": {
+        "description": "Normalize db_query_duration_seconds → db.client.operation.duration",
+        "field": "labels.__name__",
+        "pattern": "^db_query_duration_seconds(?:_bucket|_count|_sum)?$",
+        "replacement": "db.client.operation.duration",
+        "ignore_missing": true
+      }
+    },
+    {
+      "gsub": {
+        "description": "Normalize db_connections_active → db.client.connection.count",
+        "field": "labels.__name__",
+        "pattern": "^db_connections_active$",
+        "replacement": "db.client.connection.count",
+        "ignore_missing": true
+      }
+    },
+    {
+      "gsub": {
+        "description": "Normalize db_errors_total → db.client.operation.errors",
+        "field": "labels.__name__",
+        "pattern": "^db_errors_total$",
+        "replacement": "db.client.operation.errors",
+        "ignore_missing": true
+      }
+    },
+
+    // Go runtime metric names
+    {
+      "gsub": {
+        "description": "Normalize go_memstats_stack_sys_bytes → go.memory.stack.system",
+        "field": "labels.__name__",
+        "pattern": "^go_memstats_stack_sys_bytes$",
+        "replacement": "go.memory.stack.system",
+        "ignore_missing": true
+      }
+    },
+
+    // -------------------------------------------------------------------------
+    // LAYER 2 — Universal resource attribute promotion
+    //
+    // These labels are present on EVERY Prometheus metric regardless of domain.
+    // job and instance are Prometheus's built-in identity labels.
+    // The others are static labels from the scrape config.
+    //
+    // Strategy: COPY (not rename) — original labels remain for compatibility
+    // with existing PromQL queries and dashboards during migration.
+    // -------------------------------------------------------------------------
+
+    {
+      "set": {
+        "description": "job → service.name (primary service identity)",
+        "field": "labels.service.name",
+        "copy_from": "labels.job",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "instance → service.instance.id (host:port identity)",
+        "field": "labels.service.instance.id",
+        "copy_from": "labels.instance",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "host_name → host.name",
+        "field": "labels.host.name",
+        "copy_from": "labels.host_name",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "env → deployment.environment.name",
+        "field": "labels.deployment.environment.name",
+        "copy_from": "labels.env",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "region → cloud.region",
+        "field": "labels.cloud.region",
+        "copy_from": "labels.region",
+        "ignore_empty_value": true
+      }
+    },
+
+    // Split instance (host:port) into server.address and server.port.
+    // instance is always "host:port" in Prometheus — split on the last colon
+    // to handle IPv6 addresses correctly.
+    {
+      "grok": {
+        "description": "Split instance into server.address and server.port",
+        "field": "labels.instance",
+        "patterns": ["%{DATA:labels.server.address}:%{NUMBER:labels.server.port}"],
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
+      "convert": {
+        "description": "server.port should be an integer",
+        "field": "labels.server.port",
+        "type": "integer",
+        "ignore_missing": true
+      }
+    },
+
+    // -------------------------------------------------------------------------
+    // LAYER 2 — HTTP domain label normalization
+    //
+    // Applies to: http_requests_total, http_request_duration_seconds
+    // -------------------------------------------------------------------------
+
+    {
+      "set": {
+        "description": "method → http.request.method",
+        "field": "labels.http.request.method",
+        "copy_from": "labels.method",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "path → url.path",
+        "field": "labels.url.path",
+        "copy_from": "labels.path",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "status_code → http.response.status_code (copy before convert)",
+        "field": "labels.http.response.status_code",
+        "copy_from": "labels.status_code",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "convert": {
+        "description": "http.response.status_code must be integer per OTel spec",
+        "field": "labels.http.response.status_code",
+        "type": "integer",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+
+    // -------------------------------------------------------------------------
+    // LAYER 2 — gRPC domain label normalization
+    //
+    // Applies to: grpc_server_handled_total, grpc_server_handling_seconds
+    // gRPC status codes (OK, NOT_FOUND, etc.) map to integers per gRPC spec.
+    // We preserve the string form and add the integer form alongside it.
+    // -------------------------------------------------------------------------
+
+    {
+      "set": {
+        "description": "grpc_service → rpc.service",
+        "field": "labels.rpc.service",
+        "copy_from": "labels.grpc_service",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "grpc_method → rpc.method",
+        "field": "labels.rpc.method",
+        "copy_from": "labels.grpc_method",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "grpc_code → rpc.grpc.status_code (string form preserved)",
+        "field": "labels.rpc.grpc.status_code",
+        "copy_from": "labels.grpc_code",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "grpc_type → rpc.grpc.stream_type",
+        "field": "labels.rpc.grpc.stream_type",
+        "copy_from": "labels.grpc_type",
+        "ignore_empty_value": true
+      }
+    },
+
+    // -------------------------------------------------------------------------
+    // LAYER 2 — Database domain label normalization
+    //
+    // Applies to: db_query_duration_seconds, db_connections_active, db_errors_total
+    // db_system values (postgresql, redis) are already OTel-compliant — only
+    // the label name needs changing.
+    // -------------------------------------------------------------------------
+
+    {
+      "set": {
+        "description": "db_system → db.system.name (values already OTel-compliant)",
+        "field": "labels.db.system.name",
+        "copy_from": "labels.db_system",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "db_name → db.namespace",
+        "field": "labels.db.namespace",
+        "copy_from": "labels.db_name",
+        "ignore_empty_value": true
+      }
+    },
+    {
+      "set": {
+        "description": "db_operation → db.operation.name",
+        "field": "labels.db.operation.name",
+        "copy_from": "labels.db_operation",
+        "ignore_empty_value": true
+      }
+    },
+
+    // -------------------------------------------------------------------------
+    // LAYER 3 — Pipeline metadata
+    //
+    // Mark documents as processed by this pipeline so we can filter/track them.
+    // -------------------------------------------------------------------------
+
+    {
+      "set": {
+        "description": "Mark document as OTel-normalized by this pipeline",
+        "field": "labels.otel.normalization.applied",
+        "value": true
+      }
+    },
+    {
+      "set": {
+        "description": "Record pipeline version for future migrations",
+        "field": "labels.otel.normalization.version",
+        "value": "1.0.0"
+      }
+    }
+
+  ]
+}
