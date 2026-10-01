@@ -64,6 +64,18 @@ processors:
   # max_staleness: 2× scrape interval (15s) to handle missed scrapes cleanly.
   # ---------------------------------------------------------------------------
   cumulative_to_delta:
+    # Scope to histograms only — these are the only metrics that need delta
+    # temporality for the ES exporter. Counters must stay cumulative so they
+    # land as counter_double and support ES|QL RATE() for dashboard queries.
+    # Uses strict (exact) matching against original Prometheus names, which
+    # are still in place at this point in the pipeline (before metric_names).
+    include:
+      match_type: strict
+      metrics:
+        - "http_request_duration_seconds"
+        - "grpc_server_handling_seconds"
+        - "db_query_duration_seconds"
+        - "go_gc_duration_seconds"
     max_staleness: 30s
 
   # Automatically detect and add host-level resource attributes.
