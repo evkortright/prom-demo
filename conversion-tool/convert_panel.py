@@ -247,6 +247,9 @@ def build_esql_query(parsed: Dict[str, Any]) -> Tuple[str, str]:
     where_clauses = translate_filters_to_where(filters, service_name)
 
     lines = [f"TS {DATA_STREAM}"]
+    # Scope to recent data to match Grafana's $__rate_interval behavior.
+    # Grafana defaults to ~5 minutes for instant queries on stat/gauge panels.
+    lines.append("| WHERE @timestamp >= NOW() - 5 minutes")
     for clause in where_clauses:
         lines.append(f"| WHERE {clause}")
 
@@ -378,8 +381,8 @@ def build_kibana_panel(
                                         {
                                             "columnId": col_id,
                                             "fieldName": result_col,
-                                            "label": result_col,
-                                            "customLabel": False,
+                                            "label": title,
+                                            "customLabel": True,
                                             "meta": {
                                                 "type": "number",
                                                 "esType": "double",
