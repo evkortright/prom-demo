@@ -85,6 +85,7 @@ METRIC_MAP: Dict[str, Tuple[str, str]] = {
 # Label name mappings
 LABEL_MAP: Dict[str, str] = {
     "mode":       "system.cpu.state",
+    "cpu":        "system.cpu.logical_number",
     "mountpoint": "system.filesystem.mountpoint",
     "fstype":     "system.filesystem.type",
     "device":     "system.device",
@@ -163,6 +164,20 @@ def parse_promql(expr: str) -> Dict[str, Any]:
             "pattern": "simple",
             "metric": m.group(1),
             "filters": parse_filters(m.group(2)),
+        }
+
+    # Pattern: count(count(metric{filters}) by (label)) — cardinality count
+    # Used to count distinct label values (e.g. CPU cores, network interfaces)
+    nested_count_pattern = re.compile(
+        r'^count\s*\(\s*count\s*\(\s*(\w+)\s*\{([^}]*)\}\s*\)\s*by\s*\(([^)]+)\)\s*\)$'
+    )
+    m = nested_count_pattern.match(expr)
+    if m:
+        return {
+            "pattern": "nested_count",
+            "metric": m.group(1),
+            "filters": parse_filters(m.group(2)),
+            "count_by": m.group(3).strip(),
         }
 
     # Pattern: agg(rate(metric{filters}[interval])) — range/time series mode
@@ -292,6 +307,24 @@ def build_esql_query(parsed: Dict[str, Any]) -> Tuple[str, str]:
         result_col = "result_value"
         lines.append(
             f"| STATS {result_col} = {agg_fn}(RATE(`{metrics_field}`))"
+        )
+
+    elif pattern == "nested_count":
+        count_by = parsed["count_by"]
+        # Map the Prometheus label to OTel field
+        otel_field = LABEL_MAP.get(count_by, count_by)
+        if "." in otel_field:
+            otel_field_esql = f"`{otel_field}`"
+        else:
+            otel_field_esql = otel_field
+        # Need the filter field (not metrics.) for COUNT_DISTINCT
+        _, filter_field = METRIC_MAP[metric]
+        result_col = f"{count_by}_count"
+        lines.append(
+            f"| WHERE {filter_field} IS NOT NULL"
+        )
+        lines.append(
+            f"| STATS {result_col} = COUNT_DISTINCT({otel_field_esql})"
         )
 
     elif pattern == "simple":
@@ -653,6 +686,101 @@ def build_kibana_timeseries_panel(
     return panel
 
 
+def build_kibana_metric_panel(
+    grafana_panel: Dict,
+    esql_query: str,
+    result_col: str,
+) -> Dict:
+    """Build a Kibana lnsMetric panel (stat — big number display)."""
+
+    panel_id = str(uuid.uuid4())
+    layer_id = str(uuid.uuid4())
+    col_id = str(uuid.uuid4())
+    view_id = str(uuid.uuid4())
+
+    title = grafana_panel.get("title", "Converted Panel")
+    grid = grafana_panel.get("gridPos", {"x": 0, "y": 0, "w": 24, "h": 15})
+
+    panel = {
+        "type": "vis",
+        "embeddableConfig": {
+            "attributes": {
+                "title": title,
+                "references": [],
+                "state": {
+                    "datasourceStates": {
+                        "textBased": {
+                            "layers": {
+                                layer_id: {
+                                    "index": view_id,
+                                    "query": {"esql": esql_query},
+                                    "columns": [
+                                        {
+                                            "columnId": col_id,
+                                            "fieldName": result_col,
+                                            "label": title,
+                                            "customLabel": True,
+                                            "meta": {
+                                                "type": "number",
+                                                "esType": "long",
+                                            },
+                                            "inMetricDimension": True,
+                                        }
+                                    ],
+                                    "timeField": "@timestamp",
+                                }
+                            },
+                            "indexPatternRefs": [
+                                {
+                                    "id": view_id,
+                                    "title": DATA_STREAM,
+                                    "timeField": "@timestamp",
+                                }
+                            ],
+                        }
+                    },
+                    "filters": [],
+                    "visualization": {
+                        "layerId": layer_id,
+                        "layerType": "data",
+                        "density": "default",
+                        "metricAccessor": col_id,
+                    },
+                    "adHocDataViews": {
+                        view_id: {
+                            "id": view_id,
+                            "title": DATA_STREAM,
+                            "timeFieldName": "@timestamp",
+                            "sourceFilters": [],
+                            "type": "esql",
+                            "fieldFormats": {},
+                            "runtimeFieldMap": {},
+                            "allowNoIndex": False,
+                            "name": DATA_STREAM,
+                            "allowHidden": False,
+                            "managed": False,
+                        }
+                    },
+                    "query": {"esql": esql_query},
+                },
+                "visualizationType": "lnsMetric",
+                "version": 2,
+            },
+            "drilldowns": [],
+        },
+        "panelIndex": panel_id,
+        "gridData": {
+            "x": grid.get("x", 0),
+            "y": grid.get("y", 0),
+            "w": grid.get("w", 24),
+            "h": grid.get("h", 15),
+            "i": panel_id,
+        },
+    }
+
+    return panel
+
+
 def build_kibana_panel(
     grafana_panel: Dict,
     esql_query: str,
@@ -820,8 +948,8 @@ def convert_panel(grafana_panel: Dict) -> tuple:
         )
         return kibana_panel, esql_query
 
-    # --- Gauge / stat panel ---
-    if panel_type in ("gauge", "stat"):
+    # --- Gauge panel ---
+    if panel_type == "gauge":
         if len(targets) > 1:
             raise ValueError(
                 f"Panel '{title}' has {len(targets)} targets — "
@@ -833,6 +961,21 @@ def convert_panel(grafana_panel: Dict) -> tuple:
         parsed = parse_promql(expr)
         esql_query, result_col = build_esql_query(parsed)
         kibana_panel = build_kibana_panel(grafana_panel, esql_query, result_col)
+        return kibana_panel, esql_query
+
+    # --- Stat panel → lnsMetric (big number display) ---
+    if panel_type == "stat":
+        if len(targets) > 1:
+            raise ValueError(
+                f"Panel '{title}' has {len(targets)} targets — "
+                f"multi-target stat panels require Tier 2 translation."
+            )
+        expr = targets[0].get("expr", "")
+        if not expr:
+            raise ValueError(f"Panel '{title}' has an empty query expression.")
+        parsed = parse_promql(expr)
+        esql_query, result_col = build_esql_query(parsed)
+        kibana_panel = build_kibana_metric_panel(grafana_panel, esql_query, result_col)
         return kibana_panel, esql_query
 
     raise ValueError(

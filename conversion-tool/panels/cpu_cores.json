@@ -1,0 +1,27 @@
+{
+  "datasource": {"type": "prometheus", "uid": "${ds_prometheus}"},
+  "fieldConfig": {
+    "defaults": {
+      "color": {"mode": "thresholds"},
+      "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+      "unit": "short"
+    },
+    "overrides": []
+  },
+  "gridPos": {"h": 2, "w": 2, "x": 18, "y": 1},
+  "id": 14,
+  "options": {
+    "colorMode": "none",
+    "graphMode": "none",
+    "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+  },
+  "targets": [
+    {
+      "expr": "count(count(node_cpu_seconds_total{instance=\"$node\",job=\"$job\"}) by (cpu))",
+      "instant": true,
+      "refId": "A"
+    }
+  ],
+  "title": "CPU Cores",
+  "type": "stat"
+}
