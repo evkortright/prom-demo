@@ -1,0 +1,37 @@
+{
+  "datasource": {"type": "prometheus", "uid": "${ds_prometheus}"},
+  "description": "Overall CPU busy percentage (averaged across all cores)",
+  "fieldConfig": {
+    "defaults": {
+      "color": {"mode": "thresholds"},
+      "decimals": 1,
+      "max": 100,
+      "min": 0,
+      "thresholds": {
+        "mode": "absolute",
+        "steps": [
+          {"color": "rgba(50, 172, 45, 0.97)"},
+          {"color": "rgba(237, 129, 40, 0.89)", "value": 85},
+          {"color": "rgba(245, 54, 54, 0.9)", "value": 95}
+        ]
+      },
+      "unit": "percent"
+    },
+    "overrides": []
+  },
+  "gridPos": {"h": 4, "w": 3, "x": 3, "y": 1},
+  "id": 20,
+  "options": {
+    "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+  },
+  "targets": [
+    {
+      "editorMode": "code",
+      "expr": "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\",instance=\"$node\",job=\"$job\"}[$__rate_interval])))",
+      "instant": true,
+      "refId": "A"
+    }
+  ],
+  "title": "CPU Busy",
+  "type": "gauge"
+}
