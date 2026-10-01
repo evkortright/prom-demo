@@ -19,11 +19,19 @@ the converter will flag them with a clear explanation.
 """
 
 import argparse
+import io
 import json
+import os
 import re
 import sys
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +338,8 @@ def translate_thresholds(grafana_thresholds: Dict) -> Dict:
             "name": "custom",
             "reverse": False,
             "rangeType": "number",
-            "rangeMin": 0,
-            "rangeMax": None,
+            "rangeMin": color_stops[0]["stop"],
+            "rangeMax": stops[-1]["stop"],
             "progression": "fixed",
             "stops": stops,
             "colorStops": color_stops,
@@ -412,8 +420,6 @@ def build_kibana_panel(
                         "colorMode": "palette",
                         "palette": palette,
                         "metricAccessor": col_id,
-                        "minAccessor": str(panel_min),
-                        "maxAccessor": str(panel_max),
                     },
                     "adHocDataViews": {
                         view_id: {
@@ -522,6 +528,44 @@ def convert_panel(grafana_panel: Dict) -> Dict:
     return kibana_panel, esql_query
 
 
+def import_to_kibana(
+    dashboard: Dict,
+    kibana_endpoint: str,
+    kibana_api_key: str,
+) -> Dict:
+    """
+    Import a dashboard to Kibana via the saved objects import API.
+    Returns the API response as a dict.
+    """
+    if not HAS_REQUESTS:
+        raise RuntimeError("'requests' is required for --import. Install with: pip install requests")
+
+    # The import API expects ndjson — one JSON object per line
+    ndjson_obj = {
+        "id": str(uuid.uuid4()),
+        "type": "dashboard",
+        "attributes": dashboard["attributes"],
+        "references": dashboard.get("references", []),
+    }
+    ndjson_content = json.dumps(ndjson_obj) + "\n"
+    ndjson_file = io.BytesIO(ndjson_content.encode("utf-8"))
+
+    url = f"{kibana_endpoint}/api/saved_objects/_import?createNewCopies=true"
+    headers = {
+        "Authorization": f"ApiKey {kibana_api_key}",
+        "kbn-xsrf": "true",
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        files={"file": ("dashboard.ndjson", ndjson_file, "application/ndjson")},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Convert a Grafana panel JSON to a Kibana panel."
@@ -540,6 +584,22 @@ def main() -> int:
         "--query-only",
         action="store_true",
         help="Print only the ES|QL query, not the full Kibana panel",
+    )
+    parser.add_argument(
+        "--import",
+        action="store_true",
+        dest="do_import",
+        help="Import the converted dashboard directly into Kibana",
+    )
+    parser.add_argument(
+        "--kibana-endpoint",
+        default=os.environ.get("KIBANA_ENDPOINT", ""),
+        help="Kibana endpoint URL (or set KIBANA_ENDPOINT env var)",
+    )
+    parser.add_argument(
+        "--kibana-api-key",
+        default=os.environ.get("KIBANA_API_KEY", ""),
+        help="Kibana API key (or set KIBANA_API_KEY env var)",
     )
     args = parser.parse_args()
 
@@ -560,6 +620,31 @@ def main() -> int:
         panels=[kibana_panel],
         title=f"Converted: {grafana_panel.get('title', 'Panel')}",
     )
+
+    if args.do_import:
+        if not args.kibana_endpoint:
+            print("ERROR: KIBANA_ENDPOINT not set. Use --kibana-endpoint or export KIBANA_ENDPOINT=...", file=sys.stderr)
+            return 2
+        if not args.kibana_api_key:
+            print("ERROR: KIBANA_API_KEY not set. Use --kibana-api-key or export KIBANA_API_KEY=...", file=sys.stderr)
+            return 2
+        try:
+            result = import_to_kibana(dashboard, args.kibana_endpoint, args.kibana_api_key)
+            if result.get("success"):
+                imported = result.get("successResults", [])
+                print(f"✓ Imported successfully ({len(imported)} object(s))")
+                for obj in imported:
+                    print(f"  {obj.get('type')}: {obj.get('destinationId', obj.get('id'))}")
+            else:
+                errors = result.get("errors", [])
+                print(f"✗ Import failed ({len(errors)} error(s))", file=sys.stderr)
+                for err in errors:
+                    print(f"  {err.get('type')}: {err.get('error', {}).get('message', '')}", file=sys.stderr)
+                return 1
+        except Exception as e:
+            print(f"✗ Import error: {e}", file=sys.stderr)
+            return 1
+        return 0
 
     output = json.dumps(dashboard, indent=2)
 
