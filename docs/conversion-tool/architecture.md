@@ -151,3 +151,47 @@ For query translation, use these field name mappings:
   review workflow.
 - Consider adding a machine-readable mapping manifest (YAML/JSON) that
   the conversion tool reads, rather than hardcoding field mappings.
+
+## Tier 1 Coverage — Node Exporter Full (as of 2026-10-01)
+
+### Panel type coverage
+
+| Grafana type | Kibana type | Status | Notes |
+|---|---|---|---|
+| `gauge` | `lnsGauge` | ✓ Complete | 5 panels in dashboard |
+| `stat` | `lnsMetric` | ✓ Complete | 5 panels in dashboard |
+| `timeseries` | `lnsXY` | ✓ Complete | 4 panels in dashboard |
+| `row` | n/a | ✓ Skip | Section dividers, no query |
+| `bargauge` | `lnsGauge` (horizontalBullet) | ⏳ Deferred | 1 panel — PSI metrics |
+
+### bargauge / PSI metrics — deferred (Linux only)
+
+The one `bargauge` panel in Node Exporter Full uses PSI (Pressure Stall
+Information) metrics: `node_pressure_cpu_waiting_seconds_total`,
+`node_pressure_memory_waiting_seconds_total`, etc.
+
+PSI is Linux kernel 4.20+ only — not available on macOS Node Exporter.
+Validation requires a real Linux system.
+
+Plan: validate on Linux Mint USB boot. The `bargauge` Kibana equivalent
+is `lnsGauge` with `shape: "horizontalBullet"` — already implemented for
+the gauge panel type. The panel type support itself is quick to add.
+
+Metrics to add to METRIC_MAP when Linux data is available:
+- `node_pressure_cpu_waiting_seconds_total` → `system.cpu.pressure`
+- `node_pressure_memory_waiting_seconds_total` → `system.memory.pressure`
+- `node_pressure_io_waiting_seconds_total` → `system.disk.pressure`
+- `node_pressure_irq_stalled_seconds_total` → `system.irq.pressure`
+
+### PromQL pattern coverage
+
+| Pattern | Example | Tier | Status |
+|---|---|---|---|
+| `scalar * (1 - agg(rate(...)))` | CPU Busy % | 1 | ✓ |
+| `agg(rate(metric{filters}[interval]))` | CPU rate | 1 | ✓ |
+| `count(count(metric) by (label))` | CPU Cores count | 1 | ✓ |
+| `simple metric{filters}` | Current value | 1 | ✓ |
+| `rate(metric{filters}[interval])` (no agg) | PSI pressure | 1 | ⏳ Deferred |
+| `agg(sum without(label)(rate(...)))` | Busy IRQs | 2 | Planned |
+| Complex exclusion `mode!='x',mode!='y'...` | Busy Other | 2 | Planned |
+| Subqueries | n/a | 3 | Out of scope |
