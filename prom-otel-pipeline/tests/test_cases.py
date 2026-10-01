@@ -36,7 +36,7 @@ TEST_CASES = [
             {"type": "field_greater_than", "field": "http_docs",  "threshold": 0},
             {"type": "field_greater_than", "field": "grpc_docs",  "threshold": 0},
             {"type": "field_greater_than", "field": "db_docs",    "threshold": 0},
-            {"type": "field_equals",       "field": "svc_count",  "expected": 1},
+            {"type": "field_equals",       "field": "svc_count",  "expected": 2},
         ],
     },
 
@@ -392,6 +392,115 @@ TEST_CASES = [
         "query": f"""
             FROM {DATA_STREAM}
             | WHERE db.client.operation.duration IS NOT NULL
+            | STATS n = COUNT(*)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+
+    # -------------------------------------------------------------------------
+    # 10. Node Exporter domain normalization
+    # -------------------------------------------------------------------------
+    {
+        "name": "node_cpu_normalized",
+        "description": "node_cpu_seconds_total renamed to system.cpu.time",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE service.name == "node-exporter"
+            | WHERE system.cpu.time IS NOT NULL
+            | STATS n = COUNT(*)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+    {
+        "name": "node_cpu_state_normalized",
+        "description": "mode label mapped to system.cpu.state",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE service.name == "node-exporter"
+            | WHERE system.cpu.time IS NOT NULL
+            | STATS n = COUNT_DISTINCT(`system.cpu.state`)
+        """,
+        "assertions": [
+            # idle, user, system, nice, iowait, irq, softirq, steal
+            {"type": "field_greater_than", "field": "n", "threshold": 3},
+        ],
+    },
+    {
+        "name": "node_memory_normalized",
+        "description": "node_memory_total_bytes renamed to system.memory.limit",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE service.name == "node-exporter"
+            | WHERE system.memory.limit IS NOT NULL
+            | STATS n = COUNT(*)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+    {
+        "name": "node_filesystem_normalized",
+        "description": "node_filesystem_size_bytes renamed to system.filesystem.capacity",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE service.name == "node-exporter"
+            | WHERE system.filesystem.capacity IS NOT NULL
+            | STATS n = COUNT_DISTINCT(`system.filesystem.mountpoint`)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+    {
+        "name": "node_disk_normalized",
+        "description": "node_disk_read_bytes_total renamed to system.disk.io.read",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE service.name == "node-exporter"
+            | WHERE system.disk.io.read IS NOT NULL
+            | STATS n = COUNT_DISTINCT(`system.device`)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+    {
+        "name": "node_network_normalized",
+        "description": "node_network_receive_bytes_total renamed to system.network.io.receive",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE service.name == "node-exporter"
+            | WHERE system.network.io.receive IS NOT NULL
+            | STATS n = COUNT_DISTINCT(`system.device`)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+    {
+        "name": "node_load_average_normalized",
+        "description": "node_load1/5/15 renamed to system.cpu.load_average.*",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE service.name == "node-exporter"
+            | WHERE `system.cpu.load_average.1m` IS NOT NULL
+            | STATS n = COUNT(*)
+        """,
+        "assertions": [
+            {"type": "field_greater_than", "field": "n", "threshold": 0},
+        ],
+    },
+    {
+        "name": "node_passthrough_present",
+        "description": "Unmapped node_* metrics pass through with original Prometheus names",
+        "query": f"""
+            FROM {DATA_STREAM}
+            | WHERE service.name == "node-exporter"
+            | WHERE node_boot_time_seconds IS NOT NULL
             | STATS n = COUNT(*)
         """,
         "assertions": [

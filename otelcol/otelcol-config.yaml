@@ -32,6 +32,14 @@ receivers:
                 region: "us-central1"
                 host_name: "prom-demo-host-01"
 
+        - job_name: "node-exporter"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["host.docker.internal:9100"]
+              labels:
+                env: "production"
+                region: "us-central1"
+
 processors:
   memory_limiter:
     check_interval: 1s
@@ -152,6 +160,36 @@ processors:
             where attributes["db_operation"] != nil
 
   # ---------------------------------------------------------------------------
+  # LAYER 2 — Node Exporter label normalization
+  #
+  # Maps Node Exporter Prometheus label names to OTel system.* semconv.
+  # Only runs on node-exporter metrics (scoped by job label already on resource).
+  # Original labels preserved alongside OTel attributes for backward compat.
+  # ---------------------------------------------------------------------------
+  transform/node:
+    metric_statements:
+      - context: datapoint
+        statements:
+          # CPU: cpu → system.cpu.logical_number, mode → system.cpu.state
+          - set(attributes["system.cpu.logical_number"], attributes["cpu"])
+            where attributes["cpu"] != nil
+          - set(attributes["system.cpu.state"], attributes["mode"])
+            where attributes["mode"] != nil and resource.attributes["service.name"] == "node-exporter"
+
+          # Filesystem: mountpoint → system.filesystem.mountpoint, fstype → system.filesystem.type
+          - set(attributes["system.filesystem.mountpoint"], attributes["mountpoint"])
+            where attributes["mountpoint"] != nil
+          - set(attributes["system.filesystem.type"], attributes["fstype"])
+            where attributes["fstype"] != nil
+
+          # Disk: device → system.device
+          - set(attributes["system.device"], attributes["device"])
+            where attributes["device"] != nil and resource.attributes["service.name"] == "node-exporter"
+
+          # Network: device → system.device (same attribute, same mapping)
+          # (already covered by system.device above)
+
+  # ---------------------------------------------------------------------------
   # LAYER 1 — Metric name normalization
   #
   # Renames Prometheus metric names to OTel semantic convention equivalents.
@@ -224,6 +262,79 @@ processors:
           - set(metric.name, "go.memory.gc.pause")
             where metric.name == "go_gc_duration_seconds"
 
+          # Node Exporter — system.* semconv
+          # CPU
+          - set(metric.name, "system.cpu.time")
+            where metric.name == "node_cpu_seconds_total"
+
+          # Memory
+          - set(metric.name, "system.memory.limit")
+            where metric.name == "node_memory_total_bytes"
+          - set(metric.name, "system.memory.usage")
+            where metric.name == "node_memory_active_bytes"
+          - set(metric.name, "system.memory.free")
+            where metric.name == "node_memory_free_bytes"
+          - set(metric.name, "system.memory.inactive")
+            where metric.name == "node_memory_inactive_bytes"
+          - set(metric.name, "system.paging.limit")
+            where metric.name == "node_memory_swap_total_bytes"
+          - set(metric.name, "system.paging.usage")
+            where metric.name == "node_memory_swap_used_bytes"
+          - set(metric.name, "system.paging.operations.page_in")
+            where metric.name == "node_memory_swapped_in_bytes_total"
+          - set(metric.name, "system.paging.operations.page_out")
+            where metric.name == "node_memory_swapped_out_bytes_total"
+
+          # Filesystem
+          - set(metric.name, "system.filesystem.capacity")
+            where metric.name == "node_filesystem_size_bytes"
+          - set(metric.name, "system.filesystem.available")
+            where metric.name == "node_filesystem_avail_bytes"
+          - set(metric.name, "system.filesystem.free")
+            where metric.name == "node_filesystem_free_bytes"
+          - set(metric.name, "system.filesystem.inodes")
+            where metric.name == "node_filesystem_files"
+          - set(metric.name, "system.filesystem.inodes.free")
+            where metric.name == "node_filesystem_files_free"
+
+          # Disk I/O
+          - set(metric.name, "system.disk.io.read")
+            where metric.name == "node_disk_read_bytes_total"
+          - set(metric.name, "system.disk.io.write")
+            where metric.name == "node_disk_written_bytes_total"
+          - set(metric.name, "system.disk.operations.read")
+            where metric.name == "node_disk_reads_completed_total"
+          - set(metric.name, "system.disk.operations.write")
+            where metric.name == "node_disk_writes_completed_total"
+          - set(metric.name, "system.disk.io_time.read")
+            where metric.name == "node_disk_read_time_seconds_total"
+          - set(metric.name, "system.disk.io_time.write")
+            where metric.name == "node_disk_write_time_seconds_total"
+
+          # Network
+          - set(metric.name, "system.network.io.receive")
+            where metric.name == "node_network_receive_bytes_total"
+          - set(metric.name, "system.network.io.transmit")
+            where metric.name == "node_network_transmit_bytes_total"
+          - set(metric.name, "system.network.packets.receive")
+            where metric.name == "node_network_receive_packets_total"
+          - set(metric.name, "system.network.packets.transmit")
+            where metric.name == "node_network_transmit_packets_total"
+          - set(metric.name, "system.network.errors.receive")
+            where metric.name == "node_network_receive_errs_total"
+          - set(metric.name, "system.network.errors.transmit")
+            where metric.name == "node_network_transmit_errs_total"
+          - set(metric.name, "system.network.dropped.receive")
+            where metric.name == "node_network_receive_drop_total"
+
+          # Load average
+          - set(metric.name, "system.cpu.load_average.1m")
+            where metric.name == "node_load1"
+          - set(metric.name, "system.cpu.load_average.5m")
+            where metric.name == "node_load5"
+          - set(metric.name, "system.cpu.load_average.15m")
+            where metric.name == "node_load15"
+
           # PASSTHROUGH — no unambiguous OTel semconv equivalent.
           # Pass through with original Prometheus names. Queryable but excluded
           # from OTel-normalized dashboards. Conversion tool flags these for
@@ -282,6 +393,7 @@ service:
         - transform/http
         - transform/grpc
         - transform/database
+        - transform/node
         - transform/metric_names
         - batch
       exporters: [elasticsearch, debug]
