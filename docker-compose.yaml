@@ -58,6 +58,31 @@ services:
         limits:
           memory: 256M
 
+  # Grafana: visualization layer for Prometheus data.
+  # Used for side-by-side comparison with Kibana/ES|QL dashboards.
+  # Access at http://localhost:3000 (admin/admin)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: prom-demo-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
 networks:
   default:
     name: prom-demo-net
+
+volumes:
+  grafana-storage:
