@@ -165,6 +165,21 @@ def parse_promql(expr: str) -> Dict[str, Any]:
             "filters": parse_filters(m.group(2)),
         }
 
+    # Pattern: agg(rate(metric{filters}[interval])) — range/time series mode
+    # Same as agg_rate but explicitly for time series (range: true targets)
+    range_rate_pattern = re.compile(
+        r'^(\w+)\s*\(\s*rate\s*\(\s*(\w+)\s*\{([^}]*)\}\s*\[([^\]]+)\]\s*\)\s*\)$'
+    )
+    m = range_rate_pattern.match(expr)
+    if m:
+        return {
+            "pattern": "agg_rate",
+            "agg_fn": m.group(1),
+            "metric": m.group(2),
+            "filters": parse_filters(m.group(3)),
+            "range": True,
+        }
+
     raise ValueError(
         f"Unsupported PromQL pattern — requires Tier 2 (AI-assisted) translation:\n  {expr}"
     )
@@ -349,6 +364,295 @@ def translate_thresholds(grafana_thresholds: Dict) -> Dict:
     }
 
 
+def build_esql_timeseries_query(
+    targets: List[Dict],
+    bucket_seconds: int = 30,
+) -> tuple:
+    """
+    Build an ES|QL time series query from multiple PromQL targets.
+
+    Merges compatible targets (same metric, same agg function, different
+    mode filters) into a single query grouped by time bucket and dimension.
+
+    Returns (query_string, metric_col, bucket_col, dimension_col, series_map)
+    where series_map maps dimension values to legend labels.
+    """
+    # Collect all parsed targets
+    parsed_targets = []
+    for t in targets:
+        expr = t.get("expr", "").strip()
+        legend = t.get("legendFormat", "")
+        try:
+            parsed = parse_promql(expr)
+            parsed["legend"] = legend
+            parsed_targets.append(parsed)
+        except ValueError:
+            # Flag unsupported targets for Tier 2
+            parsed_targets.append({
+                "pattern": "unsupported",
+                "expr": expr,
+                "legend": legend,
+            })
+
+    # Separate supported from unsupported
+    supported = [t for t in parsed_targets if t["pattern"] != "unsupported"]
+    unsupported = [t for t in parsed_targets if t["pattern"] == "unsupported"]
+
+    if unsupported:
+        for u in unsupported:
+            print(
+                f"  ⚠ Tier 2 required for: {u['expr'][:60]}... "
+                f"(legend: {u['legend']})",
+                file=sys.stderr
+            )
+
+    if not supported:
+        raise ValueError("No supported targets found — all require Tier 2 translation.")
+
+    # For now handle agg_rate targets that share the same metric
+    # Find the primary metric and dimension label
+    metrics = set(t.get("metric") for t in supported if t.get("metric"))
+    if len(metrics) > 1:
+        raise ValueError(
+            f"Multi-metric time series panels require Tier 2 translation. "
+            f"Found metrics: {metrics}"
+        )
+
+    metric = metrics.pop()
+    if metric not in METRIC_MAP:
+        raise ValueError(f"Unknown metric '{metric}' — not in mapping table.")
+
+    metrics_field, _ = METRIC_MAP[metric]
+
+    # Find which label varies across targets (the dimension)
+    # Compare filter sets to find the varying label
+    dimension_label = None
+    dimension_values = []
+    series_map = {}  # dimension_value → legend label
+
+    for t in supported:
+        filters = t.get("filters", [])
+        for f in filters:
+            if not f["value"].startswith("$"):
+                label = f["label"]
+                value = f["value"]
+                if label not in ("job", "instance"):
+                    if dimension_label is None:
+                        dimension_label = label
+                    if value not in dimension_values:
+                        dimension_values.append(value)
+                    series_map[value] = t.get("legend", value)
+
+    # Map dimension label to OTel field
+    dimension_field = LABEL_MAP.get(dimension_label, dimension_label)
+    if "." in dimension_field:
+        dimension_field_esql = f"`{dimension_field}`"
+    else:
+        dimension_field_esql = dimension_field
+
+    # Get service name from job filter
+    service_name = None
+    for t in supported:
+        for f in t.get("filters", []):
+            if f["label"] == "job" and not f["value"].startswith("$"):
+                service_name = f["value"]
+                break
+
+    # Build the query
+    bucket_col = f"BUCKET(@timestamp, {bucket_seconds} seconds)"
+    metric_col = metric.replace("_total", "").replace("node_", "system_")
+    # Simplify column name
+    metric_col = "cpu_rate"
+
+    lines = [f"TS {DATA_STREAM}"]
+    lines.append(f"| WHERE @timestamp >= NOW() - 1 hour")
+    if service_name:
+        lines.append(f'| WHERE service.name == "{service_name}"')
+    if dimension_values:
+        if len(dimension_values) == 1:
+            lines.append(
+                f'| WHERE {dimension_field_esql} == "{dimension_values[0]}"'
+            )
+        else:
+            values_str = ", ".join(f'"{v}"' for v in dimension_values)
+            lines.append(
+                f"| WHERE {dimension_field_esql} IN ({values_str})"
+            )
+
+    agg_fn = supported[0].get("agg_fn", "avg").upper()
+    lines.append(
+        f"| STATS {metric_col} = {agg_fn}(RATE(`{metrics_field}`)) "
+        f"BY {bucket_col}, {dimension_field_esql}"
+    )
+
+    return "\n".join(lines), metric_col, bucket_col, dimension_field, series_map
+
+
+def build_kibana_timeseries_panel(
+    grafana_panel: Dict,
+    esql_query: str,
+    metric_col: str,
+    bucket_col: str,
+    dimension_field: str,
+    series_map: Dict[str, str],
+) -> Dict:
+    """Build a Kibana lnsXY time series panel from a Grafana timeseries panel."""
+
+    panel_id = str(uuid.uuid4())
+    layer_id = str(uuid.uuid4())
+    view_id = str(uuid.uuid4())
+    metric_col_id = str(uuid.uuid4())
+    bucket_col_id = f"BUCKET(@timestamp, 30 seconds)"
+    dimension_col_id = str(uuid.uuid4())
+
+    title = grafana_panel.get("title", "Converted Panel")
+    grid = grafana_panel.get("gridPos", {"x": 0, "y": 0, "w": 24, "h": 15})
+
+    # Determine series type from Grafana drawStyle
+    custom = grafana_panel.get("fieldConfig", {}).get("defaults", {}).get("custom", {})
+    draw_style = custom.get("drawStyle", "line")
+    fill_opacity = custom.get("fillOpacity", 0)
+    stacking_mode = custom.get("stacking", {}).get("mode", "none")
+
+    if stacking_mode == "percent":
+        series_type = "area_percentage_stacked"
+    elif fill_opacity > 0:
+        series_type = "area"
+    else:
+        series_type = "line"
+
+    # Build columns
+    columns = [
+        {
+            "columnId": metric_col_id,
+            "fieldName": metric_col,
+            "label": metric_col,
+            "customLabel": False,
+            "meta": {"type": "number", "esType": "double"},
+            "inMetricDimension": True,
+        },
+        {
+            "columnId": bucket_col_id,
+            "fieldName": bucket_col_id,
+            "label": bucket_col_id,
+            "customLabel": False,
+            "meta": {
+                "type": "date",
+                "esType": "date",
+                "esMeta": {"bucket": {"unit": "second", "interval": 30}},
+            },
+        },
+        {
+            "columnId": dimension_col_id,
+            "fieldName": dimension_field,
+            "label": dimension_field,
+            "customLabel": False,
+            "meta": {"type": "string", "esType": "keyword"},
+        },
+    ]
+
+    panel = {
+        "type": "vis",
+        "embeddableConfig": {
+            "attributes": {
+                "title": title,
+                "references": [],
+                "state": {
+                    "datasourceStates": {
+                        "textBased": {
+                            "layers": {
+                                layer_id: {
+                                    "index": view_id,
+                                    "query": {"esql": esql_query},
+                                    "columns": columns,
+                                    "timeField": "@timestamp",
+                                }
+                            },
+                            "indexPatternRefs": [
+                                {
+                                    "id": view_id,
+                                    "title": DATA_STREAM,
+                                    "timeField": "@timestamp",
+                                }
+                            ],
+                        }
+                    },
+                    "filters": [],
+                    "visualization": {
+                        "legend": {
+                            "isVisible": True,
+                            "position": "bottom",
+                        },
+                        "valueLabels": "hide",
+                        "fittingFunction": "Linear",
+                        "axisTitlesVisibilitySettings": {
+                            "x": True, "yLeft": True, "yRight": True
+                        },
+                        "tickLabelsVisibilitySettings": {
+                            "x": True, "yLeft": True, "yRight": True
+                        },
+                        "gridlinesVisibilitySettings": {
+                            "x": True, "yLeft": True, "yRight": True
+                        },
+                        "preferredSeriesType": series_type,
+                        "layers": [
+                            {
+                                "layerId": layer_id,
+                                "seriesType": series_type,
+                                "xAccessor": bucket_col_id,
+                                "accessors": [metric_col_id],
+                                "splitAccessor": dimension_col_id,
+                                "layerType": "data",
+                                "colorMapping": {
+                                    "assignments": [],
+                                    "specialAssignments": [
+                                        {
+                                            "rules": [{"type": "other"}],
+                                            "color": {"type": "loop"},
+                                            "touched": False,
+                                        }
+                                    ],
+                                    "paletteId": "elastic_line_optimized",
+                                    "colorMode": {"type": "categorical"},
+                                },
+                            }
+                        ],
+                    },
+                    "adHocDataViews": {
+                        view_id: {
+                            "id": view_id,
+                            "title": DATA_STREAM,
+                            "timeFieldName": "@timestamp",
+                            "sourceFilters": [],
+                            "type": "esql",
+                            "fieldFormats": {},
+                            "runtimeFieldMap": {},
+                            "allowNoIndex": False,
+                            "name": DATA_STREAM,
+                            "allowHidden": False,
+                            "managed": False,
+                        }
+                    },
+                    "query": {"esql": esql_query},
+                },
+                "visualizationType": "lnsXY",
+                "version": 2,
+            },
+            "drilldowns": [],
+        },
+        "panelIndex": panel_id,
+        "gridData": {
+            "x": grid.get("x", 0),
+            "y": grid.get("y", 0),
+            "w": grid.get("w", 24),
+            "h": grid.get("h", 15),
+            "i": panel_id,
+        },
+    }
+
+    return panel
+
+
 def build_kibana_panel(
     grafana_panel: Dict,
     esql_query: str,
@@ -493,10 +797,10 @@ def build_kibana_dashboard(
 # Main
 # ---------------------------------------------------------------------------
 
-def convert_panel(grafana_panel: Dict) -> Dict:
+def convert_panel(grafana_panel: Dict) -> tuple:
     """
     Convert a single Grafana panel to a Kibana panel.
-    Returns the Kibana panel object.
+    Returns (kibana_panel, esql_query).
     Raises ValueError for unsupported patterns.
     """
     panel_type = grafana_panel.get("type", "unknown")
@@ -506,26 +810,35 @@ def convert_panel(grafana_panel: Dict) -> Dict:
     if not targets:
         raise ValueError(f"Panel '{title}' has no query targets.")
 
-    if len(targets) > 1:
-        raise ValueError(
-            f"Panel '{title}' has {len(targets)} targets — "
-            f"multi-target panels require Tier 2 (AI-assisted) translation."
+    # --- Time series panel ---
+    if panel_type == "timeseries":
+        esql_query, metric_col, bucket_col, dimension_field, series_map = \
+            build_esql_timeseries_query(targets)
+        kibana_panel = build_kibana_timeseries_panel(
+            grafana_panel, esql_query, metric_col,
+            bucket_col, dimension_field, series_map,
         )
+        return kibana_panel, esql_query
 
-    expr = targets[0].get("expr", "")
-    if not expr:
-        raise ValueError(f"Panel '{title}' has an empty query expression.")
+    # --- Gauge / stat panel ---
+    if panel_type in ("gauge", "stat"):
+        if len(targets) > 1:
+            raise ValueError(
+                f"Panel '{title}' has {len(targets)} targets — "
+                f"multi-target gauge panels require Tier 2 translation."
+            )
+        expr = targets[0].get("expr", "")
+        if not expr:
+            raise ValueError(f"Panel '{title}' has an empty query expression.")
+        parsed = parse_promql(expr)
+        esql_query, result_col = build_esql_query(parsed)
+        kibana_panel = build_kibana_panel(grafana_panel, esql_query, result_col)
+        return kibana_panel, esql_query
 
-    # Parse PromQL
-    parsed = parse_promql(expr)
-
-    # Build ES|QL
-    esql_query, result_col = build_esql_query(parsed)
-
-    # Build Kibana panel
-    kibana_panel = build_kibana_panel(grafana_panel, esql_query, result_col)
-
-    return kibana_panel, esql_query
+    raise ValueError(
+        f"Panel type '{panel_type}' is not yet supported. "
+        f"Supported types: gauge, stat, timeseries."
+    )
 
 
 def import_to_kibana(
