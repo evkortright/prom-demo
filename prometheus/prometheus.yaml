@@ -19,6 +19,13 @@ scrape_configs:
     static_configs:
       - targets: ["otelcol:8888"]
 
+  - job_name: "node-exporter"
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels:
+          env: "production"
+          region: "us-central1"
+
 # No remote_write here — Prometheus scrapes only.
 # The OTel Collector scrapes the app directly and handles
 # normalization and export to Elasticsearch.
