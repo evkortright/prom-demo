@@ -30,7 +30,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
       "id": 1,
       "options": {
         "minVizHeight": 75,
@@ -58,6 +58,129 @@
       ],
       "title": "CPU Busy",
       "type": "gauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "default"},
+      "description": "Number of CPU cores",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "default"},
+          "editorMode": "code",
+          "expr": "count(count(node_cpu_seconds_total) by (cpu))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "CPU Cores",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "default"},
+      "description": "CPU time spent busy vs idle, split by activity type",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 40,
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": {"group": "A", "mode": "percent"}
+          },
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "Busy System"},
+            "properties": [{"id": "color", "value": {"fixedColor": "#EAB839", "mode": "fixed"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Busy User"},
+            "properties": [{"id": "color", "value": {"fixedColor": "#0A437C", "mode": "fixed"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Busy Iowait"},
+            "properties": [{"id": "color", "value": {"fixedColor": "#890F02", "mode": "fixed"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Idle"},
+            "properties": [{"id": "color", "value": {"fixedColor": "#052B51", "mode": "fixed"}}]
+          }
+        ]
+      },
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 8},
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "default"},
+          "expr": "avg(rate(node_cpu_seconds_total{mode=\"system\"}[5m]))",
+          "legendFormat": "Busy System",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "default"},
+          "expr": "avg(rate(node_cpu_seconds_total{mode=\"user\"}[5m]))",
+          "legendFormat": "Busy User",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "default"},
+          "expr": "avg(rate(node_cpu_seconds_total{mode=\"iowait\"}[5m]))",
+          "legendFormat": "Busy Iowait",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "default"},
+          "expr": "avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))",
+          "legendFormat": "Idle",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "CPU Basic",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -67,7 +190,7 @@
   "time": {"from": "now-1h", "to": "now"},
   "timepicker": {},
   "timezone": "browser",
-  "title": "prom-demo: CPU Busy",
+  "title": "prom-demo: Node Exporter CPU",
   "uid": "prom-demo-cpu-busy",
   "version": 1
 }
