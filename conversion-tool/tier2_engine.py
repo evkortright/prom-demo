@@ -106,6 +106,13 @@ parsing error — this is a different language from Elasticsearch SQL (which \
 does use single quotes); do not confuse the two. Every string value anywhere \
 in the query — in WHERE, in CASE conditions, in IN (...) lists — must be \
 double-quoted, with no exceptions.
+11. Name the EVAL category column exactly `category` and the final STATS \
+aggregation column exactly `metric_value`, regardless of what the panel \
+measures (CPU, memory, disk, etc.). These exact names are required — \
+downstream code builds the Kibana visualization by looking for these two \
+column names specifically, so using different names (like `cpu_rate` or \
+`cpu_category`) will break the panel even if the query itself is syntactically \
+correct and runs fine in Kibana Dev Tools.
 
 WORKED EXAMPLE — this exact query was run and validated against live \
 Elasticsearch data, and is the pattern to follow for any panel needing a \
@@ -118,23 +125,24 @@ Correct ES|QL:
 TS metrics-prometheusreceiver.otel-default
 | WHERE @timestamp >= NOW() - 1 hour
 | WHERE service.name == "node-exporter"
-| EVAL cpu_category = CASE(
+| EVAL category = CASE(
     `system.cpu.state` == "system",  "Busy System",
     `system.cpu.state` == "user",    "Busy User",
     `system.cpu.state` IN ("irq", "softirq"), "Busy IRQs",
     `system.cpu.state` == "idle",    "Idle",
     null
   )
-| WHERE cpu_category IS NOT NULL
-| STATS cpu_rate = AVG(RATE(`metrics.system.cpu.time`))
-    BY BUCKET(@timestamp, 30 seconds), cpu_category
+| WHERE category IS NOT NULL
+| STATS metric_value = AVG(RATE(`metrics.system.cpu.time`))
+    BY BUCKET(@timestamp, 30 seconds), category
 
 Notice: ONE EVAL with ONE CASE(...) function call (flat comma list, no WHEN/\
 THEN/END), ONE WHERE to drop nulls, ONE STATS at the end producing ONE value \
-column grouped by the bucket and the category — this single STATS produces \
-ALL the named series simultaneously via the category column. Follow this \
-exact shape for the panel you are given, adapting the CASE conditions and \
-legend names to match its targets.
+column named `metric_value` grouped by the bucket and `category` — this \
+single STATS produces ALL the named series simultaneously via the category \
+column. Follow this exact shape for the panel you are given, adapting the \
+CASE conditions and legend names to match its targets, but always naming the \
+columns `metric_value` and `category` exactly as shown.
 
 You will be given: the panel's PromQL targets (expression + legend name), \
 the field mapping table, the ES|QL data stream name, and the aggregation \
@@ -345,6 +353,21 @@ def validate_esql(esql: str, expected_legends: Optional[List[str]] = None) -> Li
             if legend not in stripped:
                 issues.append(f"Expected legend \"{legend}\" does not appear anywhere in the query.")
 
+        # 5b. Standardized column names — required so convert_panel.py can
+        # build the Kibana panel without parsing arbitrary AI-chosen names
+        if not re.search(r'\bEVAL\s+category\s*=', stripped, re.IGNORECASE):
+            issues.append(
+                "EVAL column must be named exactly `category` (found something "
+                "else, or no EVAL at all) — downstream panel-building code "
+                "looks for this exact column name."
+            )
+        if not re.search(r'\bSTATS\s+metric_value\s*=', stripped, re.IGNORECASE):
+            issues.append(
+                "STATS aggregation column must be named exactly `metric_value` "
+                "(found something else, e.g. `cpu_rate`) — downstream "
+                "panel-building code looks for this exact column name."
+            )
+
     # 6. CASE must have a fallback path and the NULL should be filtered
     if ("CASE(" in stripped.upper() or "CASE (" in stripped.upper()):
         if "NULL" not in stripped.upper():
@@ -441,7 +464,7 @@ def _selftest() -> int:
     good_query = """TS metrics-prometheusreceiver.otel-default
 | WHERE @timestamp >= NOW() - 1 hour
 | WHERE service.name == "node-exporter"
-| EVAL cpu_category = CASE(
+| EVAL category = CASE(
     `system.cpu.state` == "system",  "Busy System",
     `system.cpu.state` == "user",    "Busy User",
     `system.cpu.state` == "iowait",  "Busy Iowait",
@@ -450,9 +473,9 @@ def _selftest() -> int:
     `system.cpu.state` NOT IN ("idle","user","system","iowait","irq","softirq"), "Busy Other",
     null
   )
-| WHERE cpu_category IS NOT NULL
-| STATS cpu_rate = AVG(RATE(`metrics.system.cpu.time`))
-    BY BUCKET(@timestamp, 30 seconds), cpu_category"""
+| WHERE category IS NOT NULL
+| STATS metric_value = AVG(RATE(`metrics.system.cpu.time`))
+    BY BUCKET(@timestamp, 30 seconds), category"""
     legends = ["Busy System", "Busy User", "Busy Iowait", "Busy IRQs", "Idle", "Busy Other"]
     issues = validate_esql(good_query, legends)
     print(f"[Case 1: valid unified query] issues found: {len(issues)}")

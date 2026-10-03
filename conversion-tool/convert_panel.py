@@ -400,6 +400,8 @@ def translate_thresholds(grafana_thresholds: Dict) -> Dict:
 def build_esql_timeseries_query(
     targets: List[Dict],
     bucket_seconds: int = 30,
+    panel_title: str = "Unknown Panel",
+    allow_tier2: bool = True,
 ) -> tuple:
     """
     Build an ES|QL time series query from multiple PromQL targets.
@@ -407,8 +409,19 @@ def build_esql_timeseries_query(
     Merges compatible targets (same metric, same agg function, different
     mode filters) into a single query grouped by time bucket and dimension.
 
+    If any target can't be parsed deterministically (regex filters, label
+    exclusions, "sum without" aggregations) and allow_tier2 is True, the
+    WHOLE panel is escalated to Tier 2 (AI-assisted translation) rather than
+    silently dropping the unsupported targets — see tier2_engine.py and
+    docs/conversion-tool/architecture.md for why a unified query is required
+    rather than per-target translation.
+
     Returns (query_string, metric_col, bucket_col, dimension_col, series_map)
-    where series_map maps dimension values to legend labels.
+    where series_map maps dimension values to legend labels. For a Tier 2
+    result, metric_col/dimension_col are always "metric_value"/"category"
+    (standardized so this caller doesn't need to parse AI-chosen names) and
+    series_map is empty (Lens derives the legend directly from the category
+    column's values, which are already the correct legend names).
     """
     # Collect all parsed targets
     parsed_targets = []
@@ -438,6 +451,49 @@ def build_esql_timeseries_query(
                 f"(legend: {u['legend']})",
                 file=sys.stderr
             )
+
+        if allow_tier2:
+            print(
+                f"  → Escalating panel '{panel_title}' to Tier 2 "
+                f"(AI-assisted translation)...",
+                file=sys.stderr
+            )
+            # Deferred import: tier2_engine imports from this module at load
+            # time, so importing it at module level here would be circular.
+            # By call time this module is fully loaded, so it's safe.
+            from tier2_engine import translate_tier2
+
+            result = translate_tier2(
+                panel_title=panel_title,
+                targets=targets,  # ALL targets, not just the unsupported ones —
+                                  # the unified query must cover every series
+                bucket_seconds=bucket_seconds,
+            )
+            issues = result.get("validation_issues", [])
+            if issues:
+                raise ValueError(
+                    f"Tier 2 translation for panel '{panel_title}' failed "
+                    f"validation after {result.get('attempt', '?')} attempt(s) "
+                    f"— needs Tier 3 (human) review:\n"
+                    + "\n".join(f"  - {i}" for i in issues)
+                    + f"\n\nLast attempted ES|QL:\n{result.get('esql', '(none)')}"
+                )
+
+            print(
+                f"  ✓ Tier 2 succeeded (attempt {result.get('attempt')}, "
+                f"confidence: {result.get('confidence')})",
+                file=sys.stderr
+            )
+            bucket_col = f"BUCKET(@timestamp, {bucket_seconds} seconds)"
+            return result["esql"], "metric_value", bucket_col, "category", {}
+
+        # --tier1-only: keep the old partial behavior (unsupported targets
+        # silently dropped) for debugging/comparison purposes only.
+        print(
+            f"  (--tier1-only set: proceeding with only the "
+            f"{len(supported)} supported target(s), dropping the rest)",
+            file=sys.stderr
+        )
 
     if not supported:
         raise ValueError("No supported targets found — all require Tier 2 translation.")
@@ -925,11 +981,12 @@ def build_kibana_dashboard(
 # Main
 # ---------------------------------------------------------------------------
 
-def convert_panel(grafana_panel: Dict) -> tuple:
+def convert_panel(grafana_panel: Dict, allow_tier2: bool = True) -> tuple:
     """
     Convert a single Grafana panel to a Kibana panel.
     Returns (kibana_panel, esql_query).
-    Raises ValueError for unsupported patterns.
+    Raises ValueError for unsupported patterns (or Tier 2 validation failures
+    needing Tier 3 / human review, if allow_tier2 is True).
     """
     panel_type = grafana_panel.get("type", "unknown")
     title = grafana_panel.get("title", "Unknown")
@@ -941,7 +998,9 @@ def convert_panel(grafana_panel: Dict) -> tuple:
     # --- Time series panel ---
     if panel_type == "timeseries":
         esql_query, metric_col, bucket_col, dimension_field, series_map = \
-            build_esql_timeseries_query(targets)
+            build_esql_timeseries_query(
+                targets, panel_title=title, allow_tier2=allow_tier2
+            )
         kibana_panel = build_kibana_timeseries_panel(
             grafana_panel, esql_query, metric_col,
             bucket_col, dimension_field, series_map,
@@ -1057,14 +1116,23 @@ def main() -> int:
         default=os.environ.get("KIBANA_API_KEY", ""),
         help="Kibana API key (or set KIBANA_API_KEY env var)",
     )
+    parser.add_argument(
+        "--tier1-only",
+        action="store_true",
+        help="Disable Tier 2 escalation — unsupported targets are dropped "
+             "with a warning instead of being sent to the AI engine. "
+             "Useful for debugging or comparing Tier 1 vs Tier 2 output.",
+    )
     args = parser.parse_args()
 
     with open(args.panel) as f:
         grafana_panel = json.load(f)
 
     try:
-        kibana_panel, esql_query = convert_panel(grafana_panel)
-    except ValueError as e:
+        kibana_panel, esql_query = convert_panel(
+            grafana_panel, allow_tier2=not args.tier1_only
+        )
+    except (ValueError, RuntimeError) as e:
         print(f"CONVERSION FAILED: {e}", file=sys.stderr)
         return 1
 
@@ -1090,7 +1158,10 @@ def main() -> int:
                 imported = result.get("successResults", [])
                 print(f"✓ Imported successfully ({len(imported)} object(s))")
                 for obj in imported:
-                    print(f"  {obj.get('type')}: {obj.get('destinationId', obj.get('id'))}")
+                    obj_id = obj.get("destinationId", obj.get("id"))
+                    print(f"  {obj.get('type')}: {obj_id}")
+                    if obj.get("type") == "dashboard":
+                        print(f"  Open it at: {args.kibana_endpoint}/app/dashboards#/view/{obj_id}")
             else:
                 errors = result.get("errors", [])
                 print(f"✗ Import failed ({len(errors)} error(s))", file=sys.stderr)
