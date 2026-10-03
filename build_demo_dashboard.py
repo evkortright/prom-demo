@@ -30,7 +30,7 @@ PANEL_FILES = [
     },
     {
         "file": "cpu_basic.json",
-        "gridPos": {"x": 0, "y": 10, "w": 24, "h": 14},
+        "gridPos": {"x": 0, "y": 10, "w": 24, "h": 18},
     },
 ]
 
@@ -52,7 +52,7 @@ def main():
 
         try:
             kibana_panel, esql_query = convert_panel(grafana_panel)
-        except ValueError as e:
+        except (ValueError, RuntimeError) as e:
             print(f"  ✗ {entry['file']}: {e}", file=sys.stderr)
             continue
 
