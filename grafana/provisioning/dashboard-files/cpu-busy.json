@@ -135,6 +135,14 @@
           {
             "matcher": {"id": "byName", "options": "Idle"},
             "properties": [{"id": "color", "value": {"fixedColor": "#052B51", "mode": "fixed"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Busy IRQs"},
+            "properties": [{"id": "color", "value": {"fixedColor": "#58140C", "mode": "fixed"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Busy Other"},
+            "properties": [{"id": "color", "value": {"fixedColor": "#6ED0E0", "mode": "fixed"}}]
           }
         ]
       },
@@ -177,6 +185,20 @@
           "legendFormat": "Idle",
           "range": true,
           "refId": "D"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "default"},
+          "expr": "avg(sum without(mode)(rate(node_cpu_seconds_total{mode=~\".*irq\"}[5m])))",
+          "legendFormat": "Busy IRQs",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "default"},
+          "expr": "avg(sum without(mode)(rate(node_cpu_seconds_total{mode!=\"idle\",mode!=\"user\",mode!=\"system\",mode!=\"iowait\",mode!=\"irq\",mode!=\"softirq\"}[5m])))",
+          "legendFormat": "Busy Other",
+          "range": true,
+          "refId": "F"
         }
       ],
       "title": "CPU Basic",
@@ -192,5 +214,5 @@
   "timezone": "browser",
   "title": "prom-demo: Node Exporter CPU",
   "uid": "prom-demo-cpu-busy",
-  "version": 1
+  "version": 2
 }

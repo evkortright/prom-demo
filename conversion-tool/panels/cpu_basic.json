@@ -47,6 +47,18 @@
       "legendFormat": "Idle",
       "range": true,
       "refId": "F"
+    },
+    {
+      "expr": "avg(sum without(mode)(rate(node_cpu_seconds_total{instance=\"$node\",job=\"$job\", mode=~\".*irq\"}[$__rate_interval])))",
+      "legendFormat": "Busy IRQs",
+      "range": true,
+      "refId": "D"
+    },
+    {
+      "expr": "avg(sum without(mode)(rate(node_cpu_seconds_total{instance=\"$node\",job=\"$job\", mode!='idle',mode!='user',mode!='system',mode!='iowait',mode!='irq',mode!='softirq'}[$__rate_interval])))",
+      "legendFormat": "Busy Other",
+      "range": true,
+      "refId": "E"
     }
   ],
   "title": "CPU Basic",
