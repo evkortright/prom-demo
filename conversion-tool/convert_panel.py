@@ -1047,17 +1047,32 @@ def import_to_kibana(
     dashboard: Dict,
     kibana_endpoint: str,
     kibana_api_key: str,
+    object_id: Optional[str] = None,
+    overwrite: bool = False,
 ) -> Dict:
     """
     Import a dashboard to Kibana via the saved objects import API.
     Returns the API response as a dict.
+
+    By default (object_id=None, overwrite=False) this creates a brand-new
+    dashboard object every call — fine for one-off conversions, but repeated
+    runs pile up duplicates with different random IDs.
+
+    Pass a fixed object_id + overwrite=True (e.g. for a reference demo
+    dashboard that gets rebuilt repeatedly) to update the SAME saved object
+    in place instead. This is the preferred approach over finding and
+    deleting old copies: the Saved Objects _find API this project initially
+    used for that is unavailable on Elastic Cloud Serverless, and more
+    broadly the whole /api/saved_objects/* HTTP surface is deprecated and
+    being phased out in favor of overwrite-by-id imports and internal
+    plugin APIs.
     """
     if not HAS_REQUESTS:
         raise RuntimeError("'requests' is required for --import. Install with: pip install requests")
 
     # The import API expects ndjson — one JSON object per line
     ndjson_obj = {
-        "id": str(uuid.uuid4()),
+        "id": object_id or str(uuid.uuid4()),
         "type": "dashboard",
         "attributes": dashboard["attributes"],
         "references": dashboard.get("references", []),
@@ -1065,7 +1080,8 @@ def import_to_kibana(
     ndjson_content = json.dumps(ndjson_obj) + "\n"
     ndjson_file = io.BytesIO(ndjson_content.encode("utf-8"))
 
-    url = f"{kibana_endpoint}/api/saved_objects/_import?createNewCopies=true"
+    mode_param = "overwrite=true" if overwrite else "createNewCopies=true"
+    url = f"{kibana_endpoint}/api/saved_objects/_import?{mode_param}"
     headers = {
         "Authorization": f"ApiKey {kibana_api_key}",
         "kbn-xsrf": "true",
@@ -1079,6 +1095,84 @@ def import_to_kibana(
     )
     response.raise_for_status()
     return response.json()
+
+
+def find_saved_objects_by_title(
+    object_type: str,
+    title: str,
+    kibana_endpoint: str,
+    kibana_api_key: str,
+) -> List[Dict]:
+    """
+    Find saved objects of a given type with an EXACT title match.
+    Kibana's _find API does fuzzy/tokenized search, so results are filtered
+    client-side to exact matches — we never want to delete something just
+    because it shares a word with the target title.
+    Returns a list of {"id": ..., "type": ...} dicts.
+    """
+    if not HAS_REQUESTS:
+        raise RuntimeError("'requests' is required. Install with: pip install requests")
+
+    headers = {
+        "Authorization": f"ApiKey {kibana_api_key}",
+        "kbn-xsrf": "true",
+    }
+    # NOTE: deliberately not using the "search"/"search_fields" params here —
+    # Kibana's _find uses a simple query syntax where characters like
+    # parentheses (common in dashboard titles, e.g. "... (Converted)") are
+    # treated as query syntax and cause a 400 Bad Request. Fetching all
+    # objects of this type and filtering by exact title match client-side
+    # sidesteps that entirely; we wanted an exact match anyway.
+    matches = []
+    page = 1
+    per_page = 100
+    while True:
+        response = requests.get(
+            f"{kibana_endpoint}/api/saved_objects/_find",
+            headers=headers,
+            params={"type": object_type, "per_page": per_page, "page": page},
+            timeout=30,
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"{response.status_code} error from _find: {response.text}"
+            )
+        data = response.json()
+        saved_objects = data.get("saved_objects", [])
+
+        matches.extend(
+            {"id": obj["id"], "type": obj["type"]}
+            for obj in saved_objects
+            if obj.get("attributes", {}).get("title", "") == title
+        )
+
+        if len(saved_objects) < per_page:
+            break
+        page += 1
+
+    return matches
+
+
+def delete_saved_object(
+    object_type: str,
+    object_id: str,
+    kibana_endpoint: str,
+    kibana_api_key: str,
+) -> None:
+    """Delete a single saved object by type and id."""
+    if not HAS_REQUESTS:
+        raise RuntimeError("'requests' is required. Install with: pip install requests")
+
+    headers = {
+        "Authorization": f"ApiKey {kibana_api_key}",
+        "kbn-xsrf": "true",
+    }
+    response = requests.delete(
+        f"{kibana_endpoint}/api/saved_objects/{object_type}/{object_id}",
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
 
 
 def main() -> int:

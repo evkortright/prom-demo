@@ -17,6 +17,16 @@ from convert_panel import convert_panel, build_kibana_dashboard, import_to_kiban
 
 
 PANELS_DIR = os.path.join(os.path.dirname(__file__), "conversion-tool", "panels")
+DASHBOARD_TITLE = "Node Exporter — Kibana (Converted)"
+
+# Fixed ID (same idea as the Grafana reference dashboard's "uid":
+# "prom-demo-cpu-busy") so re-running this script updates the SAME Kibana
+# object in place instead of creating a new one each time. We tried
+# find-by-title + delete first, but that depends on the Saved Objects
+# _find API, which is unavailable on Elastic Cloud Serverless (and more
+# broadly, the whole /api/saved_objects/* HTTP surface is deprecated across
+# Elastic Stack) — overwrite-by-id is the supported path going forward.
+DASHBOARD_ID = "prom-demo-reference-dashboard"
 
 # Panels in display order with desired grid positions
 PANEL_FILES = [
@@ -70,12 +80,16 @@ def main():
 
     dashboard = build_kibana_dashboard(
         panels=kibana_panels,
-        title="Node Exporter — Kibana (Converted)",
+        title=DASHBOARD_TITLE,
     )
 
-    print(f"\nImporting {len(kibana_panels)} panel(s) to Kibana...")
+    print(f"\nImporting {len(kibana_panels)} panel(s) to Kibana "
+          f"(updating existing dashboard '{DASHBOARD_ID}' in place)...")
     try:
-        result = import_to_kibana(dashboard, kibana_endpoint, kibana_api_key)
+        result = import_to_kibana(
+            dashboard, kibana_endpoint, kibana_api_key,
+            object_id=DASHBOARD_ID, overwrite=True,
+        )
         if result.get("success"):
             imported = result.get("successResults", [])
             for obj in imported:
