@@ -401,6 +401,7 @@ def translate_tier2(
 
     last_result = None
     last_issues: List[str] = []
+    attempt_history: List[Dict[str, Any]] = []
 
     for attempt in range(max_retries + 1):
         prompt = user_prompt
@@ -420,9 +421,22 @@ def translate_tier2(
         last_result = result
         last_issues = issues
 
+        # Record this attempt in the audit trail before deciding whether to
+        # retry — a UI showing "what the AI did" needs every attempt, not
+        # just whichever one eventually succeeded.
+        attempt_history.append({
+            "attempt": attempt + 1,
+            "esql": result.get("esql", ""),
+            "explanation": result.get("explanation", ""),
+            "confidence": result.get("confidence", ""),
+            "validation_issues": issues,
+            "passed": not issues,
+        })
+
         if not issues:
             break
 
+    last_result["attempt_history"] = attempt_history
     return last_result
 
 
@@ -596,6 +610,60 @@ def _selftest() -> int:
         ("system.cpu.state" in prompt, "mapped label field present in prompt"),
     ]
     print("[Case 5: prompt construction]")
+    for ok, desc in checks:
+        print(f"    {'OK' if ok else 'FAILED'} — {desc}")
+        if not ok:
+            failures += 1
+    print()
+
+    # Case 6: attempt_history is correctly populated across a retry sequence.
+    # Mocks call_ollama to simulate: attempt 1 fails (single quotes), attempt
+    # 2 succeeds — proves translate_tier2 retains BOTH attempts for audit,
+    # not just the final successful one.
+    import unittest.mock as mock
+
+    bad_response = json.dumps({
+        "esql": (
+            'TS metrics-prometheusreceiver.otel-default\n'
+            '| EVAL category = CASE(`system.cpu.state` == \'idle\', \'Idle\', null)\n'
+            '| WHERE category IS NOT NULL\n'
+            '| STATS metric_value = AVG(RATE(`metrics.system.cpu.time`)) '
+            'BY BUCKET(@timestamp, 30 seconds), category'
+        ),
+        "explanation": "test",
+        "confidence": "high",
+        "tier": 2,
+        "approximations": [],
+    })
+    good_response = json.dumps({
+        "esql": (
+            'TS metrics-prometheusreceiver.otel-default\n'
+            '| EVAL category = CASE(`system.cpu.state` == "idle", "Idle", null)\n'
+            '| WHERE category IS NOT NULL\n'
+            '| STATS metric_value = AVG(RATE(`metrics.system.cpu.time`)) '
+            'BY BUCKET(@timestamp, 30 seconds), category'
+        ),
+        "explanation": "test",
+        "confidence": "high",
+        "tier": 2,
+        "approximations": [],
+    })
+
+    with mock.patch(f"{__name__}.call_ollama", side_effect=[bad_response, good_response]):
+        test_targets = [
+            {"expr": 'avg(rate(x{mode="idle"}[5m]))', "legendFormat": "Idle"},
+        ]
+        test_result = translate_tier2("Test Panel", test_targets)
+
+    history = test_result.get("attempt_history", [])
+    print(f"[Case 6: attempt_history across a retry] {len(history)} attempt(s) recorded")
+    checks = [
+        (len(history) == 2, "exactly 2 attempts recorded (1 failed, 1 succeeded)"),
+        (history[0]["passed"] is False if len(history) > 0 else False, "attempt 1 marked as failed"),
+        (len(history[0]["validation_issues"]) > 0 if len(history) > 0 else False, "attempt 1 has recorded validation issues"),
+        (history[1]["passed"] is True if len(history) > 1 else False, "attempt 2 marked as passed"),
+        (test_result.get("validation_issues") == [], "final result has no outstanding issues"),
+    ]
     for ok, desc in checks:
         print(f"    {'OK' if ok else 'FAILED'} — {desc}")
         if not ok:

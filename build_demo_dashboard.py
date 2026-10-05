@@ -61,7 +61,7 @@ def main():
             grafana_panel = json.load(f)
 
         try:
-            kibana_panel, esql_query = convert_panel(grafana_panel)
+            kibana_panel, esql_query, tier2_info = convert_panel(grafana_panel)
         except (ValueError, RuntimeError) as e:
             print(f"  ✗ {entry['file']}: {e}", file=sys.stderr)
             continue

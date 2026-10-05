@@ -485,7 +485,7 @@ def build_esql_timeseries_query(
                 file=sys.stderr
             )
             bucket_col = f"BUCKET(@timestamp, {bucket_seconds} seconds)"
-            return result["esql"], "metric_value", bucket_col, "category", {}
+            return result["esql"], "metric_value", bucket_col, "category", {}, result
 
         # --tier1-only: keep the old partial behavior (unsupported targets
         # silently dropped) for debugging/comparison purposes only.
@@ -574,7 +574,7 @@ def build_esql_timeseries_query(
         f"BY {bucket_col}, {dimension_field_esql}"
     )
 
-    return "\n".join(lines), metric_col, bucket_col, dimension_field, series_map
+    return "\n".join(lines), metric_col, bucket_col, dimension_field, series_map, None
 
 
 def build_kibana_timeseries_panel(
@@ -984,7 +984,13 @@ def build_kibana_dashboard(
 def convert_panel(grafana_panel: Dict, allow_tier2: bool = True) -> tuple:
     """
     Convert a single Grafana panel to a Kibana panel.
-    Returns (kibana_panel, esql_query).
+    Returns (kibana_panel, esql_query, tier2_info).
+    tier2_info is None when the panel converted via Tier 1 (gauge, stat, or
+    a timeseries panel with no unsupported targets); otherwise it's the full
+    dict returned by tier2_engine.translate_tier2() — including confidence,
+    explanation, and attempt_history (every attempt, not just the one that
+    succeeded) — so a caller (e.g. a UI) can show what the AI actually did
+    without re-running the conversion.
     Raises ValueError for unsupported patterns (or Tier 2 validation failures
     needing Tier 3 / human review, if allow_tier2 is True).
     """
@@ -997,7 +1003,7 @@ def convert_panel(grafana_panel: Dict, allow_tier2: bool = True) -> tuple:
 
     # --- Time series panel ---
     if panel_type == "timeseries":
-        esql_query, metric_col, bucket_col, dimension_field, series_map = \
+        esql_query, metric_col, bucket_col, dimension_field, series_map, tier2_info = \
             build_esql_timeseries_query(
                 targets, panel_title=title, allow_tier2=allow_tier2
             )
@@ -1005,7 +1011,7 @@ def convert_panel(grafana_panel: Dict, allow_tier2: bool = True) -> tuple:
             grafana_panel, esql_query, metric_col,
             bucket_col, dimension_field, series_map,
         )
-        return kibana_panel, esql_query
+        return kibana_panel, esql_query, tier2_info
 
     # --- Gauge panel ---
     if panel_type == "gauge":
@@ -1020,7 +1026,7 @@ def convert_panel(grafana_panel: Dict, allow_tier2: bool = True) -> tuple:
         parsed = parse_promql(expr)
         esql_query, result_col = build_esql_query(parsed)
         kibana_panel = build_kibana_panel(grafana_panel, esql_query, result_col)
-        return kibana_panel, esql_query
+        return kibana_panel, esql_query, None
 
     # --- Stat panel → lnsMetric (big number display) ---
     if panel_type == "stat":
@@ -1035,7 +1041,7 @@ def convert_panel(grafana_panel: Dict, allow_tier2: bool = True) -> tuple:
         parsed = parse_promql(expr)
         esql_query, result_col = build_esql_query(parsed)
         kibana_panel = build_kibana_metric_panel(grafana_panel, esql_query, result_col)
-        return kibana_panel, esql_query
+        return kibana_panel, esql_query, None
 
     raise ValueError(
         f"Panel type '{panel_type}' is not yet supported. "
@@ -1223,12 +1229,19 @@ def main() -> int:
         grafana_panel = json.load(f)
 
     try:
-        kibana_panel, esql_query = convert_panel(
+        kibana_panel, esql_query, tier2_info = convert_panel(
             grafana_panel, allow_tier2=not args.tier1_only
         )
     except (ValueError, RuntimeError) as e:
         print(f"CONVERSION FAILED: {e}", file=sys.stderr)
         return 1
+
+    if tier2_info and len(tier2_info.get("attempt_history", [])) > 1:
+        print(
+            f"  (Tier 2 needed {len(tier2_info['attempt_history'])} attempts "
+            f"— see attempt_history in the result for details)",
+            file=sys.stderr
+        )
 
     if args.query_only:
         print(esql_query)
